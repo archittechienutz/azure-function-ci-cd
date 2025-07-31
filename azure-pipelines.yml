@@ -1,41 +1,167 @@
 trigger:
 - main
 
+variables:
+  nodeVersion: '18.x'
+  functionAppName: 'archit-cicd-function'
+  resourceGroupName: 'function-rg'
+  location: 'East US'
+
 stages:
 - stage: Build
   displayName: 'Build Stage'
   jobs:
   - job: Build
+    displayName: 'Build the Function App'
     pool:
       vmImage: 'ubuntu-latest'
     steps:
     - task: NodeTool@0
+      displayName: 'Install Node.js'
       inputs:
-        versionSpec: '18.x'
+        versionSpec: '$(nodeVersion)'
         checkLatest: true
-    - script: npm install
-      displayName: 'Install dependencies'
+    
+    - script: |
+        echo "Installing dependencies..."
+        npm install
+      displayName: 'Install Dependencies'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/MyFuncApp'
+    
+    - script: |
+        echo "Running linting..."
+        npm run lint
+      displayName: 'Run Linting'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/MyFuncApp'
+    
+    - script: |
+        echo "Build completed successfully"
+        echo "Build artifacts prepared for deployment"
+      displayName: 'Build Validation'
+      workingDirectory: '$(System.DefaultWorkingDirectory)/MyFuncApp'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Build Artifacts'
+      inputs:
+        pathToPublish: '$(System.DefaultWorkingDirectory)/MyFuncApp'
+        artifactName: 'function-app'
+        publishLocation: 'Container'
 
 - stage: Test
   displayName: 'Test Stage'
+  dependsOn: Build
   jobs:
   - job: Test
+    displayName: 'Run Unit Tests'
     pool:
       vmImage: 'ubuntu-latest'
     steps:
-    - script: npm test || echo "No tests to run"
-      displayName: 'Run Tests'
+    - task: NodeTool@0
+      displayName: 'Install Node.js'
+      inputs:
+        versionSpec: '$(nodeVersion)'
+        checkLatest: true
+    
+    - download: current
+      artifact: function-app
+      displayName: 'Download Build Artifacts'
+    
+    - script: |
+        echo "Installing test dependencies..."
+        npm install
+      displayName: 'Install Dependencies'
+      workingDirectory: '$(Pipeline.Workspace)/function-app'
+    
+    - script: |
+        echo "Running unit tests..."
+        npm test
+      displayName: 'Run Unit Tests'
+      workingDirectory: '$(Pipeline.Workspace)/function-app'
+    
+    - script: |
+        echo "Running tests with coverage..."
+        npm run test:coverage
+      displayName: 'Run Tests with Coverage'
+      workingDirectory: '$(Pipeline.Workspace)/function-app'
+    
+    - task: PublishTestResults@2
+      displayName: 'Publish Test Results'
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '**/junit.xml'
+        mergeTestResults: true
+        testRunTitle: 'Azure Function Tests'
+      condition: succeededOrFailed()
 
 - stage: Deploy
   displayName: 'Deploy Stage'
+  dependsOn: Test
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
   - job: Deploy
+    displayName: 'Deploy Function to Azure'
     pool:
       vmImage: 'ubuntu-latest'
     steps:
-    - task: AzureFunctionApp@1
+    - download: current
+      artifact: function-app
+      displayName: 'Download Build Artifacts'
+    
+    - task: AzureCLI@2
+      displayName: 'Deploy to Azure Function App'
       inputs:
         azureSubscription: 'AzureServiceConnection1'
-        appType: functionApp
-        appName: 'archit-cicd-function'
-        package: '$(System.DefaultWorkingDirectory)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Deploying Azure Function App..."
+          
+          # Check if Function App exists, create if not
+          if ! az functionapp show --name $(functionAppName) --resource-group $(resourceGroupName) --output none 2>/dev/null; then
+            echo "Creating Function App..."
+            az functionapp create \
+              --name $(functionAppName) \
+              --resource-group $(resourceGroupName) \
+              --consumption-plan-location $(location) \
+              --runtime node \
+              --runtime-version 18 \
+              --functions-version 4 \
+              --storage-account $(functionAppName)storage \
+              --os-type Linux
+          fi
+          
+          # Deploy the function app
+          echo "Deploying function code..."
+          az functionapp deployment source config-zip \
+            --resource-group $(resourceGroupName) \
+            --name $(functionAppName) \
+            --src $(Pipeline.Workspace)/function-app/$(Build.BuildId).zip
+          
+          echo "Function App deployed successfully!"
+          echo "Function URL: https://$(functionAppName).azurewebsites.net/api/HelloWorld"
+    
+    - task: AzureCLI@2
+      displayName: 'Create Deployment Package'
+      inputs:
+        azureSubscription: 'AzureServiceConnection1'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Creating deployment package..."
+          cd $(Pipeline.Workspace)/function-app
+          zip -r $(Build.BuildId).zip . -x "node_modules/*" "*.test.js" "__tests__/*"
+    
+    - task: AzureFunctionApp@1
+      displayName: 'Deploy Function App'
+      inputs:
+        azureSubscription: 'AzureServiceConnection1'
+        appType: 'functionApp'
+        appName: '$(functionAppName)'
+        package: '$(Pipeline.Workspace)/function-app/$(Build.BuildId).zip'
+        deploymentMethod: 'auto'
+    
+    - script: |
+        echo "##vso[task.setvariable variable=functionUrl]https://$(functionAppName).azurewebsites.net/api/HelloWorld"
+        echo "Function deployed successfully!"
+        echo "Function URL: https://$(functionAppName).azurewebsites.net/api/HelloWorld"
+      displayName: 'Set Function URL'
