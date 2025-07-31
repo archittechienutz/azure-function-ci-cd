@@ -35,67 +35,27 @@ stages:
       workingDirectory: '$(System.DefaultWorkingDirectory)/MyFuncApp'
     
     - script: |
-        echo "Build completed successfully"
-        echo "Build artifacts prepared for deployment"
-      displayName: 'Build Validation'
+        echo "Running tests..."
+        npm test
+      displayName: 'Run Tests'
       workingDirectory: '$(System.DefaultWorkingDirectory)/MyFuncApp'
+    
+    - script: |
+        echo "Creating deployment package..."
+        cd $(System.DefaultWorkingDirectory)/MyFuncApp
+        zip -r function-app.zip . -x "node_modules/*" "*.test.js" "__tests__/*" "coverage/*"
+      displayName: 'Create Deployment Package'
     
     - task: PublishBuildArtifacts@1
       displayName: 'Publish Build Artifacts'
       inputs:
-        pathToPublish: '$(System.DefaultWorkingDirectory)/MyFuncApp'
+        pathToPublish: '$(System.DefaultWorkingDirectory)/MyFuncApp/function-app.zip'
         artifactName: 'function-app'
         publishLocation: 'Container'
 
-- stage: Test
-  displayName: 'Test Stage'
-  dependsOn: Build
-  jobs:
-  - job: Test
-    displayName: 'Run Unit Tests'
-    pool:
-      vmImage: 'ubuntu-latest'
-    steps:
-    - task: NodeTool@0
-      displayName: 'Install Node.js'
-      inputs:
-        versionSpec: '$(nodeVersion)'
-        checkLatest: true
-    
-    - download: current
-      artifact: function-app
-      displayName: 'Download Build Artifacts'
-    
-    - script: |
-        echo "Installing test dependencies..."
-        npm install
-      displayName: 'Install Dependencies'
-      workingDirectory: '$(Pipeline.Workspace)/function-app'
-    
-    - script: |
-        echo "Running unit tests..."
-        npm test
-      displayName: 'Run Unit Tests'
-      workingDirectory: '$(Pipeline.Workspace)/function-app'
-    
-    - script: |
-        echo "Running tests with coverage..."
-        npm run test:coverage
-      displayName: 'Run Tests with Coverage'
-      workingDirectory: '$(Pipeline.Workspace)/function-app'
-    
-    - task: PublishTestResults@2
-      displayName: 'Publish Test Results'
-      inputs:
-        testResultsFormat: 'JUnit'
-        testResultsFiles: '**/junit.xml'
-        mergeTestResults: true
-        testRunTitle: 'Azure Function Tests'
-      condition: succeededOrFailed()
-
 - stage: Deploy
   displayName: 'Deploy Stage'
-  dependsOn: Test
+  dependsOn: Build
   condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
   jobs:
   - job: Deploy
@@ -108,15 +68,43 @@ stages:
       displayName: 'Download Build Artifacts'
     
     - task: AzureCLI@2
-      displayName: 'Deploy to Azure Function App'
+      displayName: 'Create Resource Group'
       inputs:
         azureSubscription: 'AzureServiceConnection1'
         scriptType: 'bash'
         scriptLocation: 'inlineScript'
         inlineScript: |
-          echo "Deploying Azure Function App..."
+          echo "Creating resource group if it doesn't exist..."
+          az group create --name $(resourceGroupName) --location $(location) --output none
+          echo "Resource group ready: $(resourceGroupName)"
+    
+    - task: AzureCLI@2
+      displayName: 'Create Storage Account'
+      inputs:
+        azureSubscription: 'AzureServiceConnection1'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Creating storage account if it doesn't exist..."
+          storageAccountName="$(functionAppName)storage$(Build.BuildId)"
+          az storage account create \
+            --name $storageAccountName \
+            --resource-group $(resourceGroupName) \
+            --location $(location) \
+            --sku Standard_LRS \
+            --output none
+          echo "Storage account created: $storageAccountName"
+    
+    - task: AzureCLI@2
+      displayName: 'Create Function App'
+      inputs:
+        azureSubscription: 'AzureServiceConnection1'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Creating Function App if it doesn't exist..."
+          storageAccountName="$(functionAppName)storage$(Build.BuildId)"
           
-          # Check if Function App exists, create if not
           if ! az functionapp show --name $(functionAppName) --resource-group $(resourceGroupName) --output none 2>/dev/null; then
             echo "Creating Function App..."
             az functionapp create \
@@ -126,30 +114,12 @@ stages:
               --runtime node \
               --runtime-version 18 \
               --functions-version 4 \
-              --storage-account $(functionAppName)storage \
+              --storage-account $storageAccountName \
               --os-type Linux
+            echo "Function App created successfully!"
+          else
+            echo "Function App already exists!"
           fi
-          
-          # Deploy the function app
-          echo "Deploying function code..."
-          az functionapp deployment source config-zip \
-            --resource-group $(resourceGroupName) \
-            --name $(functionAppName) \
-            --src $(Pipeline.Workspace)/function-app/$(Build.BuildId).zip
-          
-          echo "Function App deployed successfully!"
-          echo "Function URL: https://$(functionAppName).azurewebsites.net/api/HelloWorld"
-    
-    - task: AzureCLI@2
-      displayName: 'Create Deployment Package'
-      inputs:
-        azureSubscription: 'AzureServiceConnection1'
-        scriptType: 'bash'
-        scriptLocation: 'inlineScript'
-        inlineScript: |
-          echo "Creating deployment package..."
-          cd $(Pipeline.Workspace)/function-app
-          zip -r $(Build.BuildId).zip . -x "node_modules/*" "*.test.js" "__tests__/*"
     
     - task: AzureFunctionApp@1
       displayName: 'Deploy Function App'
@@ -157,11 +127,13 @@ stages:
         azureSubscription: 'AzureServiceConnection1'
         appType: 'functionApp'
         appName: '$(functionAppName)'
-        package: '$(Pipeline.Workspace)/function-app/$(Build.BuildId).zip'
+        package: '$(Pipeline.Workspace)/function-app/function-app.zip'
         deploymentMethod: 'auto'
     
     - script: |
         echo "##vso[task.setvariable variable=functionUrl]https://$(functionAppName).azurewebsites.net/api/HelloWorld"
         echo "Function deployed successfully!"
         echo "Function URL: https://$(functionAppName).azurewebsites.net/api/HelloWorld"
+        echo "Test the function with:"
+        echo "curl 'https://$(functionAppName).azurewebsites.net/api/HelloWorld?name=YourName'"
       displayName: 'Set Function URL'
