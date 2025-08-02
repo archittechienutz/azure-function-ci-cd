@@ -1,0 +1,56 @@
+trigger:
+- main
+
+stages:
+# ----------------------
+# BUILD STAGE
+# ----------------------
+- stage: Build
+  displayName: 'Build Stage'
+  jobs:
+  - job: Build
+    displayName: 'Install Dependencies'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: NodeTool@0
+      inputs:
+        versionSpec: '18.x'
+    - script: |
+        npm install
+      displayName: 'Install NPM packages'
+
+# ----------------------
+# TEST STAGE (Dummy)
+# ----------------------
+- stage: Test
+  displayName: 'Test Stage'
+  dependsOn: Build
+  jobs:
+  - job: Test
+    displayName: 'Run Dummy Tests'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - script: |
+        echo "✅ All tests passed (simulated)"
+        exit 0
+      displayName: 'Run Dummy Test Script'
+
+# ----------------------
+# DEPLOY STAGE
+# ----------------------
+- stage: Deploy
+  displayName: 'Deploy to Azure'
+  dependsOn: Test
+  jobs:
+  - job: Deploy
+    displayName: 'Deploy Function to Azure'
+    pool:
+      vmImage: 'ubuntu-latest'
+    steps:
+    - task: AzureFunctionApp@1
+      inputs:
+        azureSubscription: 'AzureServiceConnection1'
+        appName: 'archit-cicd-function'
+        package: '$(System.DefaultWorkingDirectory)/**/*.zip'
